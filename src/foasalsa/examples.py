@@ -30,6 +30,7 @@ from .stft import StftConfig, stft
 from .synth import (
     SPEED_OF_SOUND,
     band_noise,
+    diffuse_field,
     direction_from_angles,
     doa_error_degrees,
     ideal_foa,
@@ -366,6 +367,13 @@ def example_04_gradient_compensation(directory):
     to ask how much the surviving bins agree with each other. Averaging unit
     vectors that all point the same way gives a vector of length 1; averaging
     unit vectors pointing at random gives a vector of length near 0.
+
+    Note that the information is not destroyed, only moved somewhere the EIV
+    does not look: the angle of X/W is a clean constant, 0 degrees with the
+    compensation and -90 without. A feature reading the angle would see an
+    offset it could subtract, which is what SALSA does for the MIC format in
+    Section II.C.2. The failure belongs to the pairing of a quadrature
+    gradient with a real-part reader, not to spatial features in general.
     """
     freqs = CONFIG.frequencies()
     truth = direction_from_angles(30.0)
@@ -704,6 +712,177 @@ def example_07_eigenvector_versus_intensity_vector(directory):
     )
 
 
+def example_08_diffuse_field(directory):
+    """What the coherence test is actually for.
+
+    Section II.A says equation (1) only holds for bins with a high
+    direct-to-reverberant ratio, and beta_drr exists to reject the rest. Every
+    other example here has a clean direct source, so the threshold never has
+    to do its job. This one adds an isotropic diffuse field: a sum of 64
+    uncorrelated plane waves from directions all over the sphere, which is the
+    standard stand-in for a reverberant tail.
+
+    The first panel is the point. The magnitude test is blind to
+    reverberation, because diffuse energy is still energy, so its pass rate
+    barely moves as the field gets more diffuse. The coherence test does all
+    the work, dropping from 16 percent of bins to under 3.
+
+    The second panel is a caveat on the first. Averaging over thousands of
+    bins already suppresses most of the damage, so throwing the bad ones away
+    changes the averaged direction only a little: 44 degrees becomes 40 at a
+    direct-to-diffuse ratio of -5 dB. The value of the test is not in that
+    average. It is that the feature handed to a network has 85 percent fewer
+    bins claiming a direction they do not have, and a network reads every bin
+    separately rather than averaging them.
+
+    The third panel compares the split of bins against Fig. 3 of the paper.
+    The numbers do not match, and the reason is worth stating rather than
+    tuning away: the paper measures a dataset of dense real recordings, while
+    this scene is three short events in silence, so far more bins fail the
+    magnitude test here. The shape of the comparison is what is meaningful,
+    not the agreement.
+
+    The last panel puts a number on something the docstrings assert: with a
+    one-frame covariance the matrix is rank one, sigma2 is zero, and the
+    coherence test passes everything.
+    """
+    duration = 3 * SECOND
+    truth = direction_from_angles(30.0)
+
+    direct = ideal_foa(truth, white_noise(duration, seed=7))
+    diffuse = diffuse_field(duration, n_waves=64, seed=0)
+
+    freqs = CONFIG.frequencies()
+    in_band = (freqs >= 50.0) & (freqs <= 9000.0)
+
+    def live_mask(features):
+        return (features[0, 4:].abs().sum(dim=0) > 0)[in_band]
+
+    def direction_error(features):
+        estimate = estimated_direction(features, band=in_band)
+        if estimate.norm() == 0:
+            return float("nan")
+        return doa_error_degrees(estimate, truth).item()
+
+    ratios_db = torch.tensor([20.0, 15.0, 10.0, 5.0, 0.0, -5.0, -10.0])
+
+    magnitude_only = FoaSalsa(config=CONFIG, apply_coherence_test=False)
+    both_tests = FoaSalsa(config=CONFIG)
+
+    pass_magnitude, pass_both, error_with, error_without = [], [], [], []
+    for ratio_db in ratios_db:
+        scene = 10 ** (float(ratio_db) / 20) * direct + diffuse
+
+        without = magnitude_only.compute(scene)
+        with_both = both_tests.compute(scene)
+
+        pass_magnitude.append(live_mask(without).float().mean().item() * 100)
+        pass_both.append(live_mask(with_both).float().mean().item() * 100)
+        error_without.append(direction_error(without))
+        error_with.append(direction_error(with_both))
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), layout="constrained")
+
+    axes[0, 0].plot(as_array(ratios_db), pass_magnitude, "o-", markersize=4,
+                    label="magnitude test only")
+    axes[0, 0].plot(as_array(ratios_db), pass_both, "s-", markersize=4,
+                    label="both tests")
+    axes[0, 0].set_xlabel("direct-to-diffuse ratio (dB)")
+    axes[0, 0].set_ylabel("bins kept, in band (%)")
+    axes[0, 0].set_title(
+        "The magnitude test does not notice reverberation", fontsize=10
+    )
+    axes[0, 0].legend(fontsize=8)
+    axes[0, 0].grid(alpha=0.3)
+    axes[0, 0].invert_xaxis()
+
+    axes[0, 1].plot(as_array(ratios_db), error_with, "o-", markersize=4,
+                    label="both tests")
+    axes[0, 1].plot(as_array(ratios_db), error_without, "s-", markersize=4,
+                    label="magnitude test only")
+    axes[0, 1].set_xlabel("direct-to-diffuse ratio (dB)")
+    axes[0, 1].set_ylabel("direction error of the surviving bins (degrees)")
+    axes[0, 1].set_title(
+        "Accuracy of the averaged estimate barely moves", fontsize=10
+    )
+    axes[0, 1].legend(fontsize=8)
+    axes[0, 1].grid(alpha=0.3)
+    axes[0, 1].invert_xaxis()
+
+    # the three-way split of Fig. 3, on a scene of short events rather than
+    # steady noise, which is closer to what the paper measured
+    gate = torch.zeros(duration)
+    for start in (0.3, 1.2, 2.1):
+        gate[int(start * SECOND) : int((start + 0.4) * SECOND)] = 1.0
+
+    events = 10 ** (5 / 20) * ideal_foa(truth, white_noise(duration, seed=7) * gate)
+    scene = events + diffuse
+
+    magnitude = live_mask(magnitude_only.compute(scene))
+    survives = live_mask(both_tests.compute(scene))
+
+    ours = [
+        (~magnitude).float().mean().item() * 100,
+        (magnitude & ~survives).float().mean().item() * 100,
+        survives.float().mean().item() * 100,
+    ]
+    theirs = [35.0, 23.0, 40.0]
+    labels = ["fail\nmagnitude", "pass magnitude,\nfail coherence", "pass\nboth"]
+
+    positions = torch.arange(3, dtype=torch.float32)
+    axes[1, 0].bar(as_array(positions - 0.2), ours, width=0.4, label="this scene")
+    axes[1, 0].bar(as_array(positions + 0.2), theirs, width=0.4,
+                   label="paper, Fig. 3 (FOA)")
+    axes[1, 0].set_xticks(as_array(positions))
+    axes[1, 0].set_xticklabels(labels, fontsize=8)
+    axes[1, 0].set_ylabel("bins in band (%)")
+    axes[1, 0].set_title(
+        "Split of bins: three short events in a diffuse field", fontsize=10
+    )
+    axes[1, 0].legend(fontsize=8)
+    axes[1, 0].grid(alpha=0.3, axis="y")
+
+    windows = [1, 3, 5, 7, 11, 15]
+    rates, errors = [], []
+    for window in windows:
+        coherence_only = FoaSalsa(
+            config=CONFIG, cov_window=window, apply_magnitude_test=False
+        )
+        rates.append(live_mask(coherence_only.compute(direct + diffuse)).float().mean().item() * 100)
+        errors.append(
+            direction_error(FoaSalsa(config=CONFIG, cov_window=window).compute(direct + diffuse))
+        )
+
+    axes[1, 1].plot(windows, rates, "o-", markersize=4, color="tab:blue")
+    axes[1, 1].set_xlabel("cov_window (the paper's 2 Tr + 1)")
+    axes[1, 1].set_ylabel("coherence test pass rate (%)", color="tab:blue")
+    axes[1, 1].tick_params(axis="y", labelcolor="tab:blue")
+    axes[1, 1].grid(alpha=0.3)
+    axes[1, 1].axvline(7, color="grey", linestyle="--", linewidth=1)
+    axes[1, 1].annotate("paper: Tr = 3", xy=(7, max(rates)), fontsize=7,
+                        color="grey", xytext=(4, -2), textcoords="offset points")
+
+    twin = axes[1, 1].twinx()
+    twin.plot(windows, errors, "s--", markersize=4, color="tab:red")
+    twin.set_ylabel("direction error (degrees)", color="tab:red")
+    twin.tick_params(axis="y", labelcolor="tab:red")
+    axes[1, 1].set_title(
+        "One frame gives a rank-one covariance, so nothing is rejected",
+        fontsize=10,
+    )
+
+    fig.suptitle(
+        "8. The coherence test in a diffuse field",
+        fontsize=11,
+    )
+
+    return (
+        save(fig, directory, "08_diffuse_field.png"),
+        f"at 0 dB direct-to-diffuse the coherence test keeps {pass_both[4]:.0f}% "
+        f"of bins against {pass_magnitude[4]:.0f}%",
+    )
+
+
 EXAMPLES = [
     example_01_azimuth_sweep,
     example_02_planar_array_has_no_elevation,
@@ -712,6 +891,7 @@ EXAMPLES = [
     example_05_gradient_versus_least_squares,
     example_06_salsa_features,
     example_07_eigenvector_versus_intensity_vector,
+    example_08_diffuse_field,
 ]
 
 
