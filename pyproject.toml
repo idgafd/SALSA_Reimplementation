@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "foasalsa"
+version = "0.1.0"
+description = "SALSA features for first-order ambisonics, with MIC-to-FOA conversion"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.0"]
+
+[project.optional-dependencies]
+# examples.py is the only thing that draws, so matplotlib stays optional and
+# the core package depends on torch alone
+examples = ["matplotlib>=3.7"]
+dev = ["pytest>=7", "foasalsa[examples]"]
+
+[tool.hatch.build.targets.wheel]
+# src layout: without this hatchling looks for a top-level foasalsa/ directory
+packages = ["src/foasalsa"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
