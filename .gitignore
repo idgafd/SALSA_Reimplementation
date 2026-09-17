@@ -1,0 +1,25 @@
+# virtualenvs
+v_venv/
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# source PDFs are large; the README links to them instead
+papers/
+
+# working notes, not part of the deliverable
+NOTES.md
+CLAUDE.md
+
