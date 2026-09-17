@@ -2,7 +2,9 @@
 
 Used by examples.py and by the tests. All sources are free-field plane waves,
 which is the model the paper assumes in Eq. (1) and the model both encoders
-are built on. There are no rooms, reverberation or HRTFs here.
+are built on. There are no rooms and no HRTFs. Reverberation appears only as
+diffuse_field(), a sum of plane waves from every direction, which is enough to
+exercise the coherence test but is not a room simulation.
 """
 
 import torch
@@ -174,6 +176,55 @@ def ideal_foa(direction: torch.Tensor, # [3]
     channels = [signal, *(component * signal for component in direction)]
 
     return torch.stack(channels).unsqueeze(0)
+
+
+def diffuse_field(n_samples: int,
+                  n_waves: int = 64,
+                  seed: int = 0,
+    ) -> torch.Tensor: # [1, 4, T]
+    """
+    An isotropic diffuse field, encoded directly to FOA.
+
+    Args:
+        n_samples: Length in samples.
+        n_waves: How many plane waves to sum.
+        seed: Fixed so plots redraw identically.
+
+    Returns:
+        foa: [1, 4, T], scaled to roughly unit level.
+
+    Built as a sum of uncorrelated plane waves arriving from directions spread
+    over the whole sphere. That is the standard model of a reverberant tail:
+    energy coming from everywhere at once, with no direction of its own.
+
+    This is what the coherence test of Eq. (11) exists for. Section II.A says
+    Eq. (1) only holds for bins with a high direct-to-reverberant ratio, and
+    beta_drr is there to reject the rest. Without a diffuse field to test it
+    against, that threshold is untested against the thing it was designed for.
+
+    Not a room simulation: there are no walls, no early reflections and no
+    frequency-dependent absorption. It reproduces the one property the
+    coherence test reacts to, which is that the covariance stops being close
+    to rank one.
+    """
+    if n_waves <= 0:
+        raise ValueError("n_waves must be positive.")
+
+    generator = torch.Generator().manual_seed(seed)
+
+    # normalised gaussian vectors are uniform over the sphere
+    directions = torch.randn(n_waves, 3, generator=generator)
+    directions = directions / torch.linalg.vector_norm(
+        directions, dim=-1, keepdim=True
+    )
+
+    foa = torch.zeros(1, 4, n_samples)
+    for direction in directions:
+        foa = foa + ideal_foa(direction, torch.randn(n_samples, generator=generator))
+
+    # uncorrelated sums grow as sqrt(n), so divide it back out to keep the
+    # level comparable with a single source
+    return foa / n_waves**0.5
 
 
 def doa_error_degrees(estimate: torch.Tensor, # [..., 3]

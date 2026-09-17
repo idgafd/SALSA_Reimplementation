@@ -10,6 +10,7 @@ import torch
 from foasalsa.stft import StftConfig, stft
 from foasalsa.synth import (
     SPEED_OF_SOUND,
+    diffuse_field,
     angles_from_direction,
     band_noise,
     chirp,
@@ -351,3 +352,45 @@ class TestSignals:
         assert signal.ndim == 1
         assert signal.shape[0] == 6000
         assert torch.isfinite(signal).all()
+
+
+class TestDiffuseField:
+    def test_shape_and_level(self):
+        field = diffuse_field(12000, n_waves=32)
+
+        assert field.shape == (1, 4, 12000)
+        # scaled to sit near the level of a single source
+        assert 0.5 < field.std().item() < 2.0
+
+    def test_it_has_no_direction_of_its_own(self):
+        """An isotropic field carries energy from everywhere, so the three
+        dipole channels end up with similar power and no axis dominates.
+        """
+        field = diffuse_field(24000, n_waves=128)
+
+        power = field[0, 1:].square().mean(dim=-1)
+        assert power.max() / power.min() < 2.0
+
+    def test_more_waves_make_the_covariance_less_rank_one(self):
+        """This is the property the coherence test reacts to. One plane wave
+        gives a rank-one covariance; a sum of many does not.
+        """
+        from foasalsa.salsa import _covariance, _principal_eigenvector
+
+        config = StftConfig()
+
+        def eigenvalue_ratio(n_waves):
+            cov = _covariance(stft(diffuse_field(24000, n_waves=n_waves), config), 7)
+            _, sigma1, sigma2 = _principal_eigenvector(cov, "eigh")
+            band = slice(20, 190)
+            return (sigma1[:, band] / sigma2[:, band].clamp(min=1e-12)).median().item()
+
+        assert eigenvalue_ratio(1) > 10 * eigenvalue_ratio(64)
+
+    def test_it_repeats_for_a_given_seed(self):
+        assert torch.equal(diffuse_field(6000, seed=2), diffuse_field(6000, seed=2))
+        assert not torch.equal(diffuse_field(6000, seed=2), diffuse_field(6000, seed=3))
+
+    def test_it_rejects_an_empty_field(self):
+        with pytest.raises(ValueError):
+            diffuse_field(6000, n_waves=0)
