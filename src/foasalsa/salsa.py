@@ -132,7 +132,12 @@ def _principal_eigenvector(cov: torch.Tensor, # [N, F, T_frames, 4, 4]
                       paper names in Eq. (10) for numerical stability. For a
                       Hermitian positive semi-definite matrix the two agree:
                       singular values are the eigenvalues.
-            "power" - power iteration, approximate but batched matmuls only.
+            "power" - power iteration. Uses nothing but batched matmuls, so
+                      it is differentiable and needs no LAPACK, but it is not
+                      the cheap option: on CPU it runs about three times
+                      slower than eigh, because eight iterations plus a
+                      deflation pass is sixteen passes over the tensor where
+                      eigh makes one.
 
         n_power_iterations:
             Only used by "power".
@@ -357,7 +362,7 @@ class FoaSalsa:
         method: str = "eigh", # "eigh" | "svd" | "power"
         cov_window: int = 7, # 2*Tr + 1 with Tr = 3, paper Eq. (5)
         fmin: float = 50.0, # paper V.A
-        fmax: float = 9000.0, # paper V.A, set by the array's aliasing limit
+        fmax: float = 9000.0, # paper V.A
         alpha_snr: float = 1.5, # paper Eq. (9)
         beta_drr: float = 5.0, # paper Eq. (11)
         apply_magnitude_test: bool = True,
@@ -574,8 +579,9 @@ class FoaSalsa:
             # single-source case, so a very large ratio should pass
             keep = keep * (sigma1 > self.beta_drr * sigma2)
 
-        # the band limits of Section V.A. Below fmin there is no useful
-        # signal, above fmax the array is spatially aliased
+        # the band limits of Section V.A. The paper's 9 kHz is where the FOA
+        # conversion of its own array stops being frequency-independent, not
+        # an aliasing frequency, so another array needs another fmax
         freqs = self.config.frequencies(device=keep.device, dtype=keep.dtype)
         in_band = (freqs >= self.fmin) & (freqs <= self.fmax)
 
